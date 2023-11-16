@@ -16,6 +16,11 @@
  */
 package org.apache.qpid.jms;
 
+import io.netty.handler.proxy.HttpProxyHandler;
+import io.netty.handler.proxy.ProxyHandler;
+
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.AccessController;
@@ -23,6 +28,7 @@ import java.security.PrivilegedAction;
 import java.util.EnumMap;
 import java.util.Map;
 import java.util.function.BiFunction;
+import java.util.function.Supplier;
 
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
@@ -72,6 +78,8 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
     private static final String CLIENT_ID_PROP = "clientID";
     private static final String DEFAULT_REMOTE_HOST = "localhost";
     private static final String DEFAULT_REMOTE_PORT = "5672";
+
+    private static final String USE_JVM_PROXY_PROP = "useJVMProxy";
 
     public static final String REMOTE_URI_PROP = "remoteURI";
 
@@ -154,7 +162,44 @@ public class JmsConnectionFactory extends JNDIStorable implements ConnectionFact
             setRemoteURI(remoteURI);
         }
 
+        configureProxyFromProps(props);
+
         return PropertyUtil.setProperties(this, props);
+    }
+
+    private void configureProxyFromProps(Map<String, String> props) {
+        String remoteURIScheme = remoteURI != null
+            ? remoteURI.getScheme()
+            : "";
+
+        String useJVMProxy = props.remove(USE_JVM_PROXY_PROP);
+        if (!remoteURIScheme.startsWith("amqpws") || !Boolean.parseBoolean(useJVMProxy)) {
+            return;
+        }
+
+        String proxyScheme = "http";
+        if ("amqpwss".equals(remoteURIScheme)) {
+            proxyScheme = "https";
+        }
+
+        String proxyHost = System.getProperty(proxyScheme + ".proxyHost");
+        String proxyPort = System.getProperty(proxyScheme + ".proxyPort");
+        if (proxyPort == null || proxyPort.isBlank()) {
+            proxyPort = "https".equals(proxyScheme) ? "443" : "80";
+        }
+        if (proxyHost != null && !proxyHost.isBlank()) {
+            int proxyPortInt = Integer.parseInt(proxyPort);
+            setExtension(JmsConnectionExtensions.PROXY_HANDLER_SUPPLIER.toString(),
+                (conn, uri) -> {
+                    SocketAddress proxyAddress =
+                        new InetSocketAddress(proxyHost, proxyPortInt);
+                    LOG.debug(String.format(
+                        "Configured http proxy handler supplying proxy %s for %s "
+                            + "connection", proxyAddress, remoteURIScheme));
+                    return (Supplier<ProxyHandler>) () -> new HttpProxyHandler(
+                        proxyAddress);
+                });
+        }
     }
 
     @Override
